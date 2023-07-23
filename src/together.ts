@@ -12,18 +12,13 @@ import {
   Permissions,
   Struct,
   Bool,
+  Circuit,
 } from 'snarkyjs';
 import { ProposalWithSigns, Proposal } from './utils/proposal';
-import { Permit } from './utils/permit';
 import { ApproverHashes } from './utils/contract_state';
+import { MAX_APPROVER_NUM } from './constants';
 
 class ApprovalMerkleWitness extends MerkleWitness(8) {}
-
-class ThresholdUpdate extends Struct({
-  contractAddress: PublicKey,
-  contractNonce: UInt32,
-  newThreshold: UInt32,
-}) {}
 
 class Account extends Struct({
   publicKey: PublicKey,
@@ -88,6 +83,35 @@ export class together extends SmartContract {
     }
   }
 
+  getWeightOfBatchSigner(
+    approvers: PublicKey[],
+    approverPoints: UInt32[],
+    paths: ApprovalMerkleWitness[]
+  ): UInt32 {
+    let total: UInt32 = new UInt32(0);
+    for (let i = 0; i < MAX_APPROVER_NUM; i++) {
+      const newApprover = new Account({
+        publicKey: approvers.at(i) as PublicKey,
+        approvePoints: approverPoints.at(i) as UInt32,
+      });
+
+      const root = this.approversRoot.get();
+      root.assertEquals(root);
+      const equal = Bool(
+        (paths.at(i) as ApprovalMerkleWitness).calculateRoot(
+          newApprover.hash()
+        ) === root
+      );
+      total.add(approverPoints.at(i) as UInt32);
+      if (equal) {
+        return total;
+      } else {
+        return new UInt32(0);
+      }
+    }
+    return new UInt32();
+  }
+
   @method init() {
     super.init();
     this.approversRoot.set(initialCommitment);
@@ -106,9 +130,28 @@ export class together extends SmartContract {
   }
 
   @method
-  sendAssets(proposalWithSigns: ProposalWithSigns) {
+  sendAssets(
+    proposalWithSigns: ProposalWithSigns,
+    approvers: PublicKey[],
+    approverPoints: UInt32[],
+    paths: ApprovalMerkleWitness[]
+  ) {
     let approverHashes = this.approverHashes.get();
     this.approverHashes.assertEquals(approverHashes);
+    const approverLen = new UInt32(approvers.length);
+    approverLen.assertGreaterThan(proposalWithSigns.proposal.signThreshold);
+
+    let out = Circuit.if(
+      new Bool(approverLen === new UInt32(1)),
+      this.getWeightOfSigner(
+        approvers.at(0) as PublicKey,
+        approverPoints.at(0) as UInt32,
+        paths.at(0) as ApprovalMerkleWitness
+      ),
+      this.getWeightOfBatchSigner(approvers, approverPoints, paths)
+    );
+
+    out.assertEquals(proposalWithSigns.proposal.signThreshold);
 
     let approverThreshold = this.approverThreshold.get();
     this.approverThreshold.assertEquals(approverThreshold);
@@ -135,39 +178,6 @@ export class together extends SmartContract {
     this.latestProposalHash.set(Poseidon.hash(Proposal.toFields(proposal)));
 
     this.emitEvent('proposal', proposal);
-  }
-
-  @method
-  approvePermit(permit: Permit): Bool {
-    return this.approvePermitInternal(permit);
-  }
-
-  approvePermitInternal(permit: Permit): Bool {
-    let approverHashes = this.approverHashes.get();
-    this.approverHashes.assertEquals(approverHashes);
-
-    let approverThreshold = this.approverThreshold.get();
-    this.approverThreshold.assertEquals(approverThreshold);
-
-    return permit.verify(approverHashes, approverThreshold);
-  }
-
-  @method
-  updateApproverThreshold(permit: Permit, update: ThresholdUpdate) {
-    let authDataHash = Poseidon.hash(ThresholdUpdate.toFields(update));
-    permit.authDataHash.assertEquals(
-      authDataHash,
-      'Permit and ThresholdUpdate must be consistent'
-    );
-
-    this.account.nonce.assertEquals(update.contractNonce);
-    this.self.publicKey.assertEquals(update.contractAddress);
-    this.self.body.incrementNonce = Bool(true);
-
-    this.approvePermitInternal(permit).assertTrue('Permit verification failed');
-    this.approverThreshold.set(update.newThreshold);
-
-    this.emitEvent('thresholdUpdate', update);
   }
 }
 
