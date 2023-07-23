@@ -1,3 +1,3 @@
-import { Add } from './Add.js';
+import { together } from './together.js';
 
-export { Add };
+export { together };
